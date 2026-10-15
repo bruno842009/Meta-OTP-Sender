@@ -27,6 +27,32 @@ def strip_json_prefix(text):
     return text
 
 
+def get_headers(ua, referer=None):
+    """إرجاع Headers حديثة تحاكي متصفح حقيقي"""
+    headers = {
+        'User-Agent': ua,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0',
+        'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+    }
+
+    if referer:
+        headers['Referer'] = referer
+        headers['Sec-Fetch-Site'] = 'same-origin'
+
+    return headers
+
+
 def process_number(number, proxy=None, resend_count=1, timeout=20):
     """
     معالجة رقم واحد
@@ -39,16 +65,20 @@ def process_number(number, proxy=None, resend_count=1, timeout=20):
         session.proxies.update(proxy)
 
     try:
+        # تأخير عشوائي ليبدو بشرياً
+        time.sleep(random.uniform(1.0, 2.5))
+
         # ============ الخطوة 1: زيارة meta.ai ============
         print(f"  [1/4] زيارة meta.ai...")
 
-        headers = {
-            'User-Agent': ua,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
+        headers = get_headers(ua)
 
-        r = session.get("https://www.meta.ai/", headers=headers, timeout=timeout)
+        r = session.get(
+            "https://www.meta.ai/",
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=True
+        )
 
         if r.status_code != 200:
             return False, f"فشل الزيارة (Status: {r.status_code})"
@@ -71,10 +101,10 @@ def process_number(number, proxy=None, resend_count=1, timeout=20):
         }
 
         oidc_headers = {
-            **headers,
+            **get_headers(ua, referer='https://www.meta.ai/'),
             'Content-Type': 'application/x-www-form-urlencoded',
             'Origin': 'https://www.meta.ai',
-            'Referer': 'https://www.meta.ai/',
+            'X-FB-LSD': lsd,
         }
 
         r = session.post(
@@ -103,7 +133,7 @@ def process_number(number, proxy=None, resend_count=1, timeout=20):
 
         r = session.get(
             oidc_uri,
-            headers={**headers, 'Referer': 'https://www.meta.ai/'},
+            headers=get_headers(ua, referer='https://www.meta.ai/'),
             allow_redirects=True,
             timeout=timeout
         )
@@ -132,10 +162,9 @@ def process_number(number, proxy=None, resend_count=1, timeout=20):
         }
 
         check_headers = {
-            **headers,
+            **get_headers(ua, referer=auth_url),
             'Content-Type': 'application/x-www-form-urlencoded',
             'Origin': 'https://auth.meta.com',
-            'Referer': auth_url,
             'X-FB-LSD': auth_tokens.get('lsd', ''),
         }
 
@@ -146,17 +175,35 @@ def process_number(number, proxy=None, resend_count=1, timeout=20):
             timeout=timeout
         )
 
-        # إعادة إرسال OTP
-        if resend_count > 0:
-            for i in range(resend_count):
-                print(f"  🔄 إعادة إرسال {i+1}/{resend_count}...")
-                time.sleep(random.uniform(0.5, 1.5))
+        # فحص الاستجابة
+        if r.status_code == 200:
+            resp_text = strip_json_prefix(r.text)
 
-        return True, "تم إرسال OTP بنجاح"
+            try:
+                resp_data = json.loads(resp_text)
+
+                if resp_data.get("error"):
+                    error_msg = resp_data.get("errorDescription", "خطأ")
+                    return False, f"Meta رفضت: {error_msg}"
+
+                # إعادة إرسال OTP
+                if resend_count > 0:
+                    for i in range(resend_count):
+                        print(f"  🔄 إعادة إرسال {i+1}/{resend_count}...")
+                        time.sleep(random.uniform(0.5, 1.5))
+
+                return True, "تم إرسال OTP بنجاح"
+
+            except json.JSONDecodeError:
+                return False, "استجابة غير صالحة من Meta"
+
+        return False, f"فشل الطلب (Status: {r.status_code})"
 
     except requests.exceptions.Timeout:
         return False, "انتهت مهلة الاتصال"
     except requests.exceptions.ProxyError:
         return False, "خطأ في البروكسي"
+    except requests.exceptions.ConnectionError:
+        return False, "خطأ في الاتصال"
     except Exception as e:
         return False, f"خطأ: {str(e)[:50]}"
