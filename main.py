@@ -3,6 +3,7 @@
 
 import sys
 import time
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import *
@@ -10,6 +11,7 @@ from file_reader import load_numbers, save_result
 from proxy_manager import load_proxies_from_file
 from api_bot import process_number
 from logger import logger, log_start, log_finish
+from report_generator import generate_html_report
 
 
 def main():
@@ -54,6 +56,12 @@ def main():
     failed = 0
     errors = 0
 
+    # قائمة النتائج للتقرير
+    results = []
+
+    # وقت البدء
+    start_time = time.time()
+
     with ThreadPoolExecutor(max_workers=threads) as executor:
         futures = {}
 
@@ -64,6 +72,8 @@ def main():
 
         for future in as_completed(futures):
             number = futures[future]
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
             try:
                 ok, msg = future.result()
 
@@ -72,26 +82,59 @@ def main():
                     print(f"{GREEN}✅ {number} — {msg}{RESET}")
                     save_result(number, "Success_Numbers.txt")
                     logger.info(f"✅ نجح: {number} — {msg}")
+                    results.append({
+                        "number": number,
+                        "status": "success",
+                        "message": msg,
+                        "time": current_time,
+                    })
                 else:
                     failed += 1
                     print(f"{RED}❌ {number} — {msg}{RESET}")
                     save_result(number, "Failed_Numbers.txt")
                     logger.warning(f"❌ فشل: {number} — {msg}")
+                    results.append({
+                        "number": number,
+                        "status": "failed",
+                        "message": msg,
+                        "time": current_time,
+                    })
 
             except Exception as e:
                 errors += 1
                 print(f"{RED}⚠️  {number} — خطأ: {e}{RESET}")
                 logger.error(f"⚠️  خطأ: {number} — {e}")
+                results.append({
+                    "number": number,
+                    "status": "error",
+                    "message": str(e)[:80],
+                    "time": current_time,
+                })
+
+    # حساب المدة
+    duration = time.time() - start_time
 
     # تسجيل النهاية
     log_finish(success, failed, errors)
 
+    # عرض النتائج
     print(f"\n{GREEN}{LINE}")
     print(f"  📊 النتائج:")
     print(f"  ✅ نجح: {success}")
     print(f"  ❌ فشل: {failed}")
     print(f"  ⚠️  أخطاء: {errors}")
+    print(f"  ⏱️  المدة: {duration:.1f} ثانية")
     print(f"{LINE}{RESET}")
+
+    # توليد تقرير HTML
+    try:
+        report_file = generate_html_report(results, duration)
+        print(f"{CYAN}  📄 التقرير: {report_file}{RESET}")
+        logger.info(f"📄 تم إنشاء التقرير: {report_file}")
+    except Exception as e:
+        print(f"{RED}  ⚠️  فشل إنشاء التقرير: {e}{RESET}")
+        logger.error(f"فشل إنشاء التقرير: {e}")
+
     print(f"{CYAN}  📁 السجلات: logs/{RESET}")
 
 
