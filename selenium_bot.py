@@ -22,8 +22,8 @@ from user_agents import get_random_ua
 
 # ============ الإعدادات ============
 FACEBOOK_URL = "https://www.facebook.com/login/identify/?locale=en_US"
-MAX_WINDOWS = 5  # الحد الأقصى للنوافذ المتزامنة
-PAGE_TIMEOUT = 20  # ثوانٍ
+MAX_WINDOWS = 3
+PAGE_TIMEOUT = 40
 
 
 def safe_click(driver, el, name=""):
@@ -41,18 +41,28 @@ def safe_click(driver, el, name=""):
 
 
 def create_driver(headless=False):
-    """إنشاء WebDriver"""
+    """إنشاء WebDriver - نسخة محسّنة"""
     options = Options()
     if headless:
         options.add_argument("--headless=new")
 
+    # تحسينات الأداء
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--disable-extensions")
+
+    # إخفاء الأتمتة
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
+
+    # إعدادات إضافية
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-infobars")
     options.add_argument("--mute-audio")
-    options.add_argument("--window-size=600,800")
+    options.add_argument("--window-size=500,700")
     options.add_argument(f"user-agent={get_random_ua()}")
 
     driver = webdriver.Chrome(
@@ -72,103 +82,134 @@ def process_number(number, headless=False):
     driver = None
 
     try:
-        # ============ 1: فتح المتصفح ============
+        # 1: فتح المتصفح
         driver = create_driver(headless=headless)
 
-        # ============ 2: فتح الصفحة ============
+        # 2: فتح الصفحة
         driver.get(FACEBOOK_URL)
         time.sleep(2)
 
-        # ============ 3: إدخال الرقم ============
-        phone_input = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, "//input[@type='text']"))
-        )
-        phone_input.clear()
-        phone_input.send_keys(number)
-        time.sleep(1)
+        # 3: إدخال الرقم
+        try:
+            phone_input = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='text']"))
+            )
+            phone_input.clear()
+            phone_input.send_keys(number)
+            time.sleep(1)
+        except Exception as e:
+            return False, f"لم نجد حقل الإدخال: {str(e)[:40]}", "failed"
 
-        # ============ 4: Continue الأول ============
-        el = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH,
-                "//div[@role='button' and .//span[text()='Continue']]"))
-        )
-        safe_click(driver, el, "Continue #1")
-        time.sleep(5)
+        # 4: Continue الأول
+        try:
+            el = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH,
+                    "//div[@role='button' and .//span[text()='Continue']]"))
+            )
+            safe_click(driver, el, "Continue #1")
+            time.sleep(5)
+        except Exception as e:
+            return False, f"لم نجد زر Continue: {str(e)[:40]}", "failed"
 
-        # ============ 5: اختيار SMS لرقمنا ============
-        sms_clicked = False
-        all_radios = driver.find_elements(By.XPATH, "//input[@type='radio']")
+        # 5: فحص الصفحة الحالية
+        current_url = driver.current_url
 
-        for radio in all_radios:
-            try:
-                radio_id = radio.get_attribute("id") or ""
-                if radio_id:
-                    try:
-                        label = driver.find_element(By.XPATH, f"//label[@for='{radio_id}']")
-                        if number in label.text:
-                            safe_click(driver, label, "SMS option")
-                            sms_clicked = True
-                            break
-                    except:
-                        pass
+        if "login/identify" in current_url:
+            return False, "لم ننتقل لصفحة الخيارات", "failed"
 
-                parent = radio.find_element(By.XPATH, "./..")
-                if number in parent.text:
-                    safe_click(driver, radio, "SMS option (radio)")
-                    sms_clicked = True
-                    break
-            except:
-                continue
+        if "login" in current_url and "recover" not in current_url:
+            return False, "الصفحة تطلب كلمة المرور", "failed"
 
-        if not sms_clicked:
-            return False, "لم نجد خيار SMS", "failed"
+        # 6: البحث عن صفحة OTP أو خيارات SMS
+        time.sleep(3)
 
-        time.sleep(1)
-
-        # ============ 6: Continue الأزرق ============
-        spans = driver.find_elements(By.XPATH, "//span[text()='Continue']")
-        continue_clicked = False
-
-        for span in spans:
-            try:
-                parent = span.find_element(By.XPATH, "./ancestor::*[@role='button'][1]")
-                if parent.text.strip() == "Continue":
-                    safe_click(driver, parent, "Continue الأزرق")
-                    continue_clicked = True
-                    break
-            except:
-                continue
-
-        if not continue_clicked:
-            return False, "لم نجد زر Continue الأزرق", "failed"
-
-        time.sleep(5)
-
-        # ============ 7: التحقق من النتيجة ============
         body_text = driver.find_element(By.TAG_NAME, "body").text
 
-        # كشف OTP
-        if "Enter the code" in body_text or "We sent" in body_text or "6-digit" in body_text:
+        # الحالة 1: صفحة الخيارات
+        if "Choose a way to log in" in body_text or "Get code via SMS" in body_text:
+            print(f"     → صفحة الخيارات")
+
+            sms_clicked = False
+            all_radios = driver.find_elements(By.XPATH, "//input[@type='radio']")
+
+            for radio in all_radios:
+                try:
+                    radio_id = radio.get_attribute("id") or ""
+                    if radio_id:
+                        try:
+                            label = driver.find_element(By.XPATH, f"//label[@for='{radio_id}']")
+                            if number in label.text:
+                                safe_click(driver, label, "SMS option")
+                                sms_clicked = True
+                                break
+                        except:
+                            pass
+
+                    parent = radio.find_element(By.XPATH, "./..")
+                    if number in parent.text:
+                        safe_click(driver, radio, "SMS option (radio)")
+                        sms_clicked = True
+                        break
+                except:
+                    continue
+
+            if not sms_clicked:
+                return False, "لم نجد خيار SMS", "failed"
+
+            time.sleep(1)
+
+            # النقر على Continue الأزرق
+            spans = driver.find_elements(By.XPATH, "//span[text()='Continue']")
+            continue_clicked = False
+
+            for span in spans:
+                try:
+                    parent = span.find_element(By.XPATH, "./ancestor::*[@role='button'][1]")
+                    if parent.text.strip() == "Continue":
+                        safe_click(driver, parent, "Continue الأزرق")
+                        continue_clicked = True
+                        break
+                except:
+                    continue
+
+            if not continue_clicked:
+                return False, "لم نجد Continue الأزرق", "failed"
+
+            time.sleep(5)
+
+        # الحالة 2: صفحة OTP مباشرة
+        elif "Enter the code" in body_text or "6-digit" in body_text or "We sent" in body_text:
+            print(f"     → صفحة OTP مباشرة")
+            return True, "OTP مُرسَل مباشرة", "success"
+
+        # الحالة 3: Captcha
+        elif "not a robot" in body_text.lower() or "captcha" in body_text.lower():
+            print(f"     → Captcha")
+            return True, "OTP مُرسَل - Captcha ظهرت", "success"
+
+        # الحالة 4: صفحة غير معروفة
+        else:
+            return False, "صفحة غير معروفة", "failed"
+
+        # 7: التحقق النهائي
+        time.sleep(3)
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+
+        if any(kw in body_text for kw in ["Enter the code", "We sent", "6-digit", "Confirmation code"]):
             return True, "OTP مُرسَل - حقل الكود ظهر", "success"
 
-        # كشف Captcha
-        captcha_keywords = ["not a robot", "captcha", "security check", "verify", "مليء بالأمان"]
-        for kw in captcha_keywords:
-            if kw.lower() in body_text.lower():
-                return True, "OTP مُرسَل - Captcha ظهرت", "success"
+        if any(kw in body_text.lower() for kw in ["not a robot", "captcha", "security check"]):
+            return True, "OTP مُرسَل - Captcha ظهرت", "success"
 
-        # كشف أننا في صفحة OTP
-        try:
-            driver.find_element(By.XPATH, "//input[@autocomplete='one-time-code'] | //input[@inputmode='numeric']")
-            return True, "OTP مُرسَل - حقل الكود موجود", "success"
-        except:
-            pass
-
-        # لم نصل لنتيجة واضحة لكن عادةً هذا يعني OTP
-        return True, "OTP مُرسَل (لم نكتشف captcha)", "success"
+        return True, "OTP مُرسَل (غير مؤكد)", "success"
 
     except Exception as e:
-        return False, f"خطأ: {str(e)[:60]}", "error"
+        error_msg = str(e)[:80]
+
+        if "timeout" in error_msg.lower():
+            return False, "Timeout من Chrome", "error"
+
+        return False, f"خطأ: {error_msg}", "error"
 
     finally:
         if driver:
@@ -191,28 +232,29 @@ def run():
 
     print(f"{GREEN}[●]{WHITE} عدد الأرقام: {len(numbers)}")
 
-    # اختيار الوضع
+    # الوضع
     try:
         mode = input(f"{GREEN}[●]{WHITE} الوضع (1=مرئي, 2=مخفي) [افتراضي: 1]: ").strip() or "1"
         headless = (mode == "2")
     except:
         headless = False
 
-    # عدد النوافذ المتزامنة
+    # عدد النوافذ
+    print(f"{YELLOW}⚠️  تحذير: 3 نوافذ قد تسبب timeouts{RESET}")
     try:
-        windows = int(input(f"{GREEN}[●]{WHITE} عدد النوافذ [افتراضي: 3, أقصى: 5]: ").strip() or "3")
-        windows = min(windows, MAX_WINDOWS)
+        windows = int(input(f"{GREEN}[●]{WHITE} عدد النوافذ [افتراضي: 2, أقصى: 3]: ").strip() or "2")
+        windows = min(windows, 3)
         windows = max(windows, 1)
     except:
-        windows = 3
+        windows = 2
 
     print(f"\n{GREEN}{LINE}")
     print(f"  🚀 بدء المعالجة...")
     print(f"  🪟 النوافذ: {windows}")
     print(f"  👁️  الوضع: {'مخفي' if headless else 'مرئي'}")
+    print(f"  ⏱️  Timeout: {PAGE_TIMEOUT} ثانية")
     print(f"{LINE}{RESET}\n")
 
-    # تسجيل
     log_start(len(numbers), 0)
     logger.info(f"🪟 عدد النوافذ: {windows}")
     logger.info(f"👁️  الوضع: {'headless' if headless else 'visible'}")
@@ -223,7 +265,6 @@ def run():
     results = []
     start_time = time.time()
 
-    # تشغيل متوازٍ
     with ThreadPoolExecutor(max_workers=windows) as executor:
         futures = {}
 
@@ -282,13 +323,9 @@ def run():
                     "time": current_time,
                 })
 
-    # المدة
     duration = time.time() - start_time
-
-    # تسجيل النهاية
     log_finish(success, failed, errors)
 
-    # النتائج
     print(f"\n{GREEN}{LINE}")
     print(f"  📊 النتائج:")
     print(f"  ✅ نجح: {success}")
@@ -297,7 +334,6 @@ def run():
     print(f"  ⏱️  المدة: {duration:.1f} ثانية")
     print(f"{LINE}{RESET}")
 
-    # تقرير HTML
     try:
         report_file = generate_html_report(results, duration)
         print(f"{CYAN}  📄 التقرير: {report_file}{RESET}")
